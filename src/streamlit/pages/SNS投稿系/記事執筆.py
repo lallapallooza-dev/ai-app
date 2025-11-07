@@ -19,6 +19,8 @@ import dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ast
 import functools
+import traceback
+from google.auth.exceptions import RefreshError
 
 dotenv.load_dotenv()
 
@@ -36,20 +38,9 @@ PARENT_FOLDER_ID = "1O_TG3aDkzs1sOVE1v6B4hjByNmsgAwCx"
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 def authenticate_oauth():
-    """Service Account認証でGoogle Drive APIクライアントを取得"""
+    """OAuth2.0認証でGoogle Drive APIクライアントを取得"""
     try:
-        # Streamlit secretsからService Account認証情報を取得
-        if 'gcp_service_account2' in st.secrets:
-            service_account_info = st.secrets['gcp_service_account2']
-            
-            # Service Account認証情報を作成
-            credentials = service_account.Credentials.from_service_account_info(
-                service_account_info, scopes=SCOPES
-            )
-            
-            return build('drive', 'v3', credentials=credentials)
-        
-        # フォールバック: 環境変数から認証情報を取得
+        # Heroku環境では環境変数からcredentials.jsonの内容を取得
         credentials_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
         token_json = os.getenv('GOOGLE_TOKEN_JSON')
         
@@ -146,63 +137,255 @@ def get_gspread_client():
     ]
 
     try:
-        # Streamlit secretsからService Account認証情報を取得
-        if 'gcp_service_account2' in st.secrets:
-            service_account_info = st.secrets['gcp_service_account2']
-            
-            # Service Account認証情報を作成
-            credentials = service_account.Credentials.from_service_account_info(
-                service_account_info, scopes=SCOPES
-            )
-            
-            return gspread.authorize(credentials)
-        
-        # フォールバック: 環境変数から認証情報を取得
+        # Heroku環境では環境変数からcredentials.jsonの内容を取得
         credentials_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
         token_json = os.getenv('GOOGLE_TOKEN_JSON')
+        service_account_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
+        
+        # サービスアカウントキーが存在する場合は優先的に使用
+        if service_account_json:
+            st.write("🔍 認証モード: Heroku環境（サービスアカウントキーを使用）")
+            try:
+                service_account_info = json.loads(service_account_json)
+                creds = service_account.Credentials.from_service_account_info(
+                    service_account_info, scopes=SCOPES
+                )
+                st.write("✅ サービスアカウントキーからの認証に成功")
+                try:
+                    client = gspread.authorize(creds)
+                    st.write("✅ gspreadクライアントの初期化に成功")
+                    return client
+                except Exception as e:
+                    st.write(f"❌ gspreadクライアントの初期化に失敗: {str(e)}")
+                    st.write(f"   エラータイプ: {type(e).__name__}")
+                    st.write(f"   エラー詳細: {traceback.format_exc()}")
+                    return None
+            except json.JSONDecodeError as e:
+                st.write(f"❌ GOOGLE_SERVICE_ACCOUNT_JSONの解析に失敗: {str(e)}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                # サービスアカウントキーが無効な場合は、OAuth2.0認証を試す
+            except Exception as e:
+                st.write(f"❌ サービスアカウントキーからの認証に失敗: {str(e)}")
+                st.write(f"   エラータイプ: {type(e).__name__}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                # サービスアカウントキーが無効な場合は、OAuth2.0認証を試す
         
         if credentials_json and token_json:
             # Heroku環境での認証
-            credentials_data = json.loads(credentials_json)
-            token_data = json.loads(token_json)
+            st.write("🔍 認証モード: Heroku環境（環境変数から認証情報を取得）")
+            try:
+                credentials_data = json.loads(credentials_json)
+                st.write("✅ GOOGLE_CREDENTIALS_JSONの解析に成功")
+            except json.JSONDecodeError as e:
+                st.write(f"❌ GOOGLE_CREDENTIALS_JSONの解析に失敗: {str(e)}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return None
             
-            # 認証情報を作成
-            creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+            try:
+                token_data = json.loads(token_json)
+                st.write("✅ GOOGLE_TOKEN_JSONの解析に成功")
+                
+                # トークンデータの状態を確認
+                if 'refresh_token' in token_data:
+                    st.write("✅ リフレッシュトークンが存在します")
+                else:
+                    st.write("⚠️ リフレッシュトークンが存在しません")
+                
+                if 'expiry' in token_data:
+                    expiry = token_data['expiry']
+                    st.write(f"📅 トークン有効期限: {expiry}")
+                else:
+                    st.write("⚠️ トークン有効期限情報が見つかりません")
+                    
+            except json.JSONDecodeError as e:
+                st.write(f"❌ GOOGLE_TOKEN_JSONの解析に失敗: {str(e)}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return None
+            
+            try:
+                # 認証情報を作成
+                creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+                st.write("✅ Credentialsオブジェクトの作成に成功")
+                
+                # 認証情報の状態を確認
+                st.write(f"📊 認証状態チェック:")
+                st.write(f"   - valid: {creds.valid}")
+                st.write(f"   - expired: {creds.expired if hasattr(creds, 'expired') else 'N/A'}")
+                st.write(f"   - refresh_token存在: {bool(creds.refresh_token)}")
+                
+            except Exception as e:
+                st.write(f"❌ Credentialsオブジェクトの作成に失敗: {str(e)}")
+                st.write(f"   エラータイプ: {type(e).__name__}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return None
             
             # トークンが期限切れの場合は更新
             if not creds.valid:
+                st.write("⚠️ トークンが無効です。更新を試みます...")
                 if creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
+                    try:
+                        st.write("🔄 リフレッシュトークンを使用してトークンを更新中...")
+                        creds.refresh(Request())
+                        st.write("✅ トークンの更新に成功")
+                    except RefreshError as e:
+                        st.write(f"❌ トークンの更新に失敗（RefreshError）: {str(e)}")
+                        st.write(f"   エラー詳細: {traceback.format_exc()}")
+                        st.write("💡 リフレッシュトークンが無効または期限切れの可能性があります")
+                        
+                        # サービスアカウントキーが存在する場合は試す
+                        if service_account_json:
+                            st.write("🔄 サービスアカウントキーでの認証を試みます...")
+                            try:
+                                service_account_info = json.loads(service_account_json)
+                                service_creds = service_account.Credentials.from_service_account_info(
+                                    service_account_info, scopes=SCOPES
+                                )
+                                st.write("✅ サービスアカウントキーからの認証に成功")
+                                try:
+                                    client = gspread.authorize(service_creds)
+                                    st.write("✅ gspreadクライアントの初期化に成功（サービスアカウントキー使用）")
+                                    return client
+                                except Exception as auth_error:
+                                    st.write(f"❌ サービスアカウントキーでのgspreadクライアント初期化に失敗: {str(auth_error)}")
+                                    st.write(f"   エラータイプ: {type(auth_error).__name__}")
+                                    st.write(f"   エラー詳細: {traceback.format_exc()}")
+                            except json.JSONDecodeError as json_error:
+                                st.write(f"❌ GOOGLE_SERVICE_ACCOUNT_JSONの解析に失敗: {str(json_error)}")
+                            except Exception as sa_error:
+                                st.write(f"❌ サービスアカウントキーからの認証に失敗: {str(sa_error)}")
+                                st.write(f"   エラータイプ: {type(sa_error).__name__}")
+                                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                        
+                        st.write("")
+                        st.write("⚠️ **解決方法:**")
+                        st.write("1. ローカル環境で新しいトークンを取得してください")
+                        st.write("2. Herokuの環境変数 `GOOGLE_TOKEN_JSON` を更新してください")
+                        st.write("3. または、サービスアカウントキーを `GOOGLE_SERVICE_ACCOUNT_JSON` に設定してください")
+                        return None
+                    except Exception as e:
+                        st.write(f"❌ トークンの更新に失敗: {str(e)}")
+                        st.write(f"   エラータイプ: {type(e).__name__}")
+                        st.write(f"   エラー詳細: {traceback.format_exc()}")
+                        return None
                 else:
-                    # 新しい認証フローを開始
-                    flow = InstalledAppFlow.from_client_config(credentials_data, SCOPES)
-                    creds = flow.run_local_server(port=0)
+                    st.write("⚠️ リフレッシュトークンが存在しないか、トークンが期限切れです")
+                    st.write("💡 新しい認証フローを開始する必要があります（Heroku環境では手動で実行できません）")
+                    return None
             
-            return gspread.authorize(creds)
+            try:
+                client = gspread.authorize(creds)
+                st.write("✅ gspreadクライアントの初期化に成功")
+                return client
+            except Exception as e:
+                st.write(f"❌ gspreadクライアントの初期化に失敗: {str(e)}")
+                st.write(f"   エラータイプ: {type(e).__name__}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return None
         else:
             # ローカル環境用のOAuth2.0認証
+            st.write("🔍 認証モード: ローカル環境")
             creds = None
+            
             # token.jsonがあれば読み込み
             if os.path.exists('token.json'):
-                creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+                st.write("📁 token.jsonファイルが見つかりました")
+                try:
+                    creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+                    st.write("✅ token.jsonからの認証情報読み込みに成功")
+                    
+                    # 認証情報の状態を確認
+                    st.write(f"📊 認証状態チェック:")
+                    st.write(f"   - valid: {creds.valid}")
+                    st.write(f"   - expired: {creds.expired if hasattr(creds, 'expired') else 'N/A'}")
+                    st.write(f"   - refresh_token存在: {bool(creds.refresh_token)}")
+                    
+                except Exception as e:
+                    st.write(f"❌ token.jsonの読み込みに失敗: {str(e)}")
+                    st.write(f"   エラータイプ: {type(e).__name__}")
+                    st.write(f"   エラー詳細: {traceback.format_exc()}")
+            else:
+                st.write("⚠️ token.jsonファイルが見つかりません")
             
             # 認証が必要な場合
             if not creds or not creds.valid:
                 if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
+                    st.write("🔄 期限切れトークンをリフレッシュ中...")
+                    try:
+                        creds.refresh(Request())
+                        st.write("✅ トークンのリフレッシュに成功")
+                    except RefreshError as e:
+                        st.write(f"❌ トークンのリフレッシュに失敗（RefreshError）: {str(e)}")
+                        st.write(f"   エラー詳細: {traceback.format_exc()}")
+                        st.write("💡 リフレッシュトークンが無効または期限切れです")
+                        st.write("🔄 無効なtoken.jsonを削除して、新しい認証フローを開始します...")
+                        
+                        # 無効なtoken.jsonを削除
+                        try:
+                            if os.path.exists('token.json'):
+                                os.remove('token.json')
+                                st.write("✅ 無効なtoken.jsonを削除しました")
+                        except Exception as delete_error:
+                            st.write(f"⚠️ token.jsonの削除に失敗: {str(delete_error)}")
+                        
+                        # 新しい認証フローを開始
+                        creds = None
+                        st.write("⚠️ 新しい認証フローを開始します...")
+                        if not os.path.exists('credentials.json'):
+                            st.write("❌ credentials.jsonファイルが見つかりません")
+                            return None
+                        try:
+                            flow = InstalledAppFlow.from_client_secrets_file(
+                                'credentials.json', SCOPES)
+                            creds = flow.run_local_server(port=0)
+                            st.write("✅ 認証フローの完了に成功")
+                        except Exception as flow_error:
+                            st.write(f"❌ 認証フローの実行に失敗: {str(flow_error)}")
+                            st.write(f"   エラータイプ: {type(flow_error).__name__}")
+                            st.write(f"   エラー詳細: {traceback.format_exc()}")
+                            return None
+                    except Exception as e:
+                        st.write(f"❌ トークンのリフレッシュに失敗: {str(e)}")
+                        st.write(f"   エラータイプ: {type(e).__name__}")
+                        st.write(f"   エラー詳細: {traceback.format_exc()}")
+                        return None
                 else:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        'credentials.json', SCOPES)
-                    creds = flow.run_local_server(port=0)
+                    st.write("⚠️ 新しい認証フローを開始します...")
+                    if not os.path.exists('credentials.json'):
+                        st.write("❌ credentials.jsonファイルが見つかりません")
+                        return None
+                    try:
+                        flow = InstalledAppFlow.from_client_secrets_file(
+                            'credentials.json', SCOPES)
+                        creds = flow.run_local_server(port=0)
+                        st.write("✅ 認証フローの完了に成功")
+                    except Exception as e:
+                        st.write(f"❌ 認証フローの実行に失敗: {str(e)}")
+                        st.write(f"   エラータイプ: {type(e).__name__}")
+                        st.write(f"   エラー詳細: {traceback.format_exc()}")
+                        return None
                 
                 # トークンを保存
-                with open('token.json', 'w') as token:
-                    token.write(creds.to_json())
+                try:
+                    with open('token.json', 'w') as token:
+                        token.write(creds.to_json())
+                    st.write("✅ token.jsonへの保存に成功")
+                except Exception as e:
+                    st.write(f"⚠️ token.jsonへの保存に失敗: {str(e)}")
 
-            return gspread.authorize(creds)
+            try:
+                client = gspread.authorize(creds)
+                st.write("✅ gspreadクライアントの初期化に成功")
+                return client
+            except Exception as e:
+                st.write(f"❌ gspreadクライアントの初期化に失敗: {str(e)}")
+                st.write(f"   エラータイプ: {type(e).__name__}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return None
 
     except Exception as e:
-        st.write(f"Failed to initialize gspread client: {str(e)}")
+        st.write(f"❌ gspreadクライアントの初期化で予期しないエラーが発生しました: {str(e)}")
+        st.write(f"   エラータイプ: {type(e).__name__}")
+        st.write(f"   エラー詳細: {traceback.format_exc()}")
         return None
 
 def extract_domain_from_url(url):
@@ -595,7 +778,7 @@ def process_article_group(group_data):
         
         # 記事本文生成
         prompt = f"""
-        あなたは優秀な介護関するSEO記事執筆者です。
+        あなたは優秀なSEO記事執筆者です。
 
        【キーワード】と記事全体の構成案を参考にしつつ、構成案の1セクションのみを執筆してください。
         セクション毎に分けて執筆しており、記事全体の他のセクションの内容に関して執筆すると重複してしまう為構成案以外の内容は一切書かないでください。
@@ -721,19 +904,46 @@ def main():
             sp_client = get_gspread_client()
             if sp_client is None:
                 st.write("❌ Google Spreadsheet接続に失敗しました")
+                st.write("💡 上記の詳細なエラーメッセージを確認してください")
                 return
             
-            workbook = sp_client.open_by_url(
-                "https://docs.google.com/spreadsheets/d/12Qm5JuRnR32kS3barxSVC1DKKdZBOv5IW5nyajB7_ZA/edit?gid=0#gid=0"
-            )
-            theme = "執筆"
+            st.write("📊 スプレッドシートへの接続を試みます...")
+            try:
+                workbook = sp_client.open_by_url(
+                    "https://docs.google.com/spreadsheets/d/12Qm5JuRnR32kS3barxSVC1DKKdZBOv5IW5nyajB7_ZA/edit?gid=0#gid=0"
+                )
+                st.write("✅ スプレッドシートの開封に成功")
+            except Exception as e:
+                st.write(f"❌ スプレッドシートの開封に失敗: {str(e)}")
+                st.write(f"   エラータイプ: {type(e).__name__}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return
+            
+            theme = "記事管理"
             
             # 選択されたシートのデータを取得
-            selected_sheet = workbook.worksheet(theme)
-            sheet_data = selected_sheet.get_all_values()
-            headers = sheet_data[0]
+            try:
+                selected_sheet = workbook.worksheet(theme)
+                st.write(f"✅ シート「{theme}」の取得に成功")
+            except Exception as e:
+                st.write(f"❌ シート「{theme}」の取得に失敗: {str(e)}")
+                st.write(f"   エラータイプ: {type(e).__name__}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return
+            
+            try:
+                sheet_data = selected_sheet.get_all_values()
+                headers = sheet_data[0]
+                st.write(f"✅ シートデータの取得に成功（{len(sheet_data)}行）")
+            except Exception as e:
+                st.write(f"❌ シートデータの取得に失敗: {str(e)}")
+                st.write(f"   エラータイプ: {type(e).__name__}")
+                st.write(f"   エラー詳細: {traceback.format_exc()}")
+                return
         except Exception as e:
-            st.write(f"❌ スプレッドシート処理でエラーが発生しました: {str(e)}")
+            st.write(f"❌ スプレッドシート処理で予期しないエラーが発生しました: {str(e)}")
+            st.write(f"   エラータイプ: {type(e).__name__}")
+            st.write(f"   エラー詳細: {traceback.format_exc()}")
             return
         
         # ヘッダーから列のインデックスを取得
@@ -911,9 +1121,9 @@ def main():
                             url_log_prefix = f"[URL{i}]"
 
                 prompt = f"""
-                あなたは優秀な介護に関するSEO記事執筆者です。
+                あなたは優秀なSEO記事執筆者です。
                 【上位記事構成】は【キーワード】で検索した結果の上位サイトの見出しです。
-                介護に関する上位サイトの見出しが網羅的された見出し構成案を【要件】に従って作成してください。
+                上位サイトの見出しが網羅的された見出し構成案を【要件】に従って作成してください。
 
                 【上位記事構成】
                 {all_titles_and_headings}
@@ -922,8 +1132,8 @@ def main():
                 {keyword}
 
                 【要件】
-                - 【上位記事構成】は機械的にキーワードで検索した結果の上位サイトの見出しの為、介護に関係の無い記事の見出しが混入している可能性があります。その場合はその見出しは構成案に入れないでください。
-                - 【上位記事構成】の介護に関する見出しは削らないで網羅的にする。
+                - 【上位記事構成】は機械的にキーワードで検索した結果の上位サイトの見出しの為、関係の無い記事の見出しが混入している可能性があります。その場合はその見出しは構成案に入れないでください。
+                - 【上位記事構成】の関係の無い記事の見出しは削らないで網羅的にする。
                 - 意味合いとして重複する見出しは統合する。
                 - 全ての見出しは独自の言い回しになるように書き換えてください。
                 - 多言語の可能性があるが全て日本語に統一してください。
